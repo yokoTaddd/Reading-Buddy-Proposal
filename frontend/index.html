@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reading Buddy API Tester</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        section { border: 1px solid #ccc; padding: 15px; margin-bottom: 20px; border-radius: 5px; }
+        h2 { margin-top: 0; }
+        .hidden { display: none; }
+        button { padding: 5px 10px; cursor: pointer; }
+        input, select { padding: 5px; margin-right: 10px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>Reading Buddy Tester</h1>
+    <div id="status" style="color: green; font-weight: bold; margin-bottom: 20px;"></div>
+    <div id="error" style="color: red; font-weight: bold; margin-bottom: 20px;"></div>
+
+    <!-- AUTHENTICATION -->
+    <section id="auth-section">
+        <h2>1. Authentication</h2>
+        
+        <h3>Register</h3>
+        <input type="text" id="reg-username" placeholder="Username">
+        <input type="password" id="reg-password" placeholder="Password">
+        <select id="reg-role">
+            <option value="big_buddy">Big Buddy</option>
+            <option value="little_buddy">Little Buddy</option>
+        </select>
+        <button onclick="register()">Register</button>
+
+        <h3>Login</h3>
+        <input type="text" id="login-username" placeholder="Username">
+        <input type="password" id="login-password" placeholder="Password">
+        <button onclick="login()">Login</button>
+    </section>
+
+    <!-- DASHBOARD -->
+    <div id="dashboard" class="hidden">
+        <h2>Dashboard - <span id="current-user"></span> (<span id="current-role"></span>)</h2>
+        <button onclick="logout()">Logout</button>
+
+        <!-- PAIRING -->
+        <section id="pairing-section">
+            <h3>Pairing</h3>
+            <div id="big-buddy-pair" class="hidden">
+                <button onclick="generatePairCode()">Generate Pairing Code</button>
+                <div id="generated-code"></div>
+            </div>
+            
+            <div id="little-buddy-pair" class="hidden">
+                <input type="text" id="join-code" placeholder="Enter Pairing Code">
+                <button onclick="joinPair()">Join Pair</button>
+            </div>
+        </section>
+
+        <!-- VOCABULARY -->
+        <section id="vocab-section">
+            <h3>Vocabulary</h3>
+            
+            <div id="big-buddy-vocab" class="hidden">
+                <h4>Add Word & Audio</h4>
+                <input type="text" id="new-word" placeholder="Word text">
+                <br><br>
+                <button id="record-btn" onclick="toggleRecording()">Start Recording</button>
+                <span id="recording-status" style="color: red;" class="hidden">Recording...</span>
+                <br><br>
+                <audio id="audio-playback" controls class="hidden"></audio>
+                <br><br>
+                <button onclick="uploadVocabulary()">Upload Word + Audio</button>
+            </div>
+
+            <div>
+                <h4>Word List</h4>
+                <button onclick="loadVocabulary()">Refresh Words</button>
+                <ul id="vocab-list"></ul>
+            </div>
+        </section>
+
+        <!-- READING LOG -->
+        <section id="reading-section">
+            <h3>Reading Log</h3>
+            <input type="text" id="new-book-title" placeholder="Book Title">
+            <select id="new-book-status">
+                <option value="reading">Currently Reading</option>
+                <option value="completed">Completed</option>
+            </select>
+            <button onclick="addBook()">Add Book</button>
+
+            <h4>All Books</h4>
+            <button onclick="loadBooks()">Refresh Books</button>
+            <ul id="books-list"></ul>
+        </section>
+
+    </div>
+
+    <script>
+        const API_URL = "http://localhost:8000";
+        let token = null;
+        let role = null;
+        let username = null;
+
+        // Audio Recording variables
+        let mediaRecorder;
+        let audioChunks = [];
+        let audioBlob = null;
+        let isRecording = false;
+
+        function showStatus(msg) { document.getElementById('status').innerText = msg; setTimeout(() => document.getElementById('status').innerText='', 3000); }
+        function showError(msg) { document.getElementById('error').innerText = msg; setTimeout(() => document.getElementById('error').innerText='', 5000); }
+
+        async function apiCall(endpoint, method="GET", body=null, isFormData=false) {
+            const headers = {};
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            if (!isFormData && body) headers['Content-Type'] = 'application/json';
+
+            const options = { method, headers };
+            if (body) {
+                options.body = isFormData ? body : JSON.stringify(body);
+            }
+
+            const res = await fetch(`${API_URL}${endpoint}`, options);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({detail: "Unknown error"}));
+                showError(err.detail || res.statusText);
+                throw new Error("API call failed");
+            }
+            return res.headers.get("content-type")?.includes("application/json") ? res.json() : await res.blob();
+        }
+
+        async function register() {
+            try {
+                const username = document.getElementById('reg-username').value;
+                const password = document.getElementById('reg-password').value;
+                const role = document.getElementById('reg-role').value;
+                await apiCall('/register', 'POST', {username, password, role});
+                showStatus("Registration successful! Please login.");
+            } catch (e) {}
+        }
+
+        async function login() {
+            try {
+                const usernameInput = document.getElementById('login-username').value;
+                const passwordInput = document.getElementById('login-password').value;
+                
+                const formData = new FormData();
+                formData.append('username', usernameInput);
+                formData.append('password', passwordInput);
+
+                // Need literal fetch here since it's form url encoded
+                const res = await fetch(`${API_URL}/token`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!res.ok) throw new Error("Login failed");
+                const data = await res.json();
+                
+                token = data.access_token;
+                role = data.role;
+                username = usernameInput;
+                
+                showStatus("Logged in successfully!");
+                updateUI();
+            } catch (e) {
+                showError("Login failed");
+            }
+        }
+
+        function logout() {
+            token = null; role = null; username = null;
+            updateUI();
+            showStatus("Logged out");
+        }
+
+        function updateUI() {
+            if (token) {
+                document.getElementById('auth-section').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+                document.getElementById('current-user').innerText = username;
+                document.getElementById('current-role').innerText = role;
+
+                if (role === 'big_buddy') {
+                    document.getElementById('big-buddy-pair').classList.remove('hidden');
+                    document.getElementById('little-buddy-pair').classList.add('hidden');
+                    document.getElementById('big-buddy-vocab').classList.remove('hidden');
+                } else {
+                    document.getElementById('little-buddy-pair').classList.remove('hidden');
+                    document.getElementById('big-buddy-pair').classList.add('hidden');
+                    document.getElementById('big-buddy-vocab').classList.add('hidden');
+                }
+                
+                loadBooks();
+                loadVocabulary();
+            } else {
+                document.getElementById('auth-section').classList.remove('hidden');
+                document.getElementById('dashboard').classList.add('hidden');
+            }
+        }
+
+        // --- Pairing ---
+        async function generatePairCode() {
+            try {
+                const data = await apiCall('/pair/generate', 'POST');
+                document.getElementById('generated-code').innerText = `Your Code: ${data.pairing_code}`;
+            } catch(e) {}
+        }
+
+        async function joinPair() {
+            try {
+                const code = document.getElementById('join-code').value;
+                await apiCall('/pair/join', 'POST', {pairing_code: code});
+                showStatus("Paired successfully!");
+            } catch(e) {}
+        }
+
+        // --- Vocabulary & Audio ---
+        async function toggleRecording() {
+            const btn = document.getElementById('record-btn');
+            const statusLabel = document.getElementById('recording-status');
+            
+            if (!isRecording) {
+                // start recording
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = () => {
+                    audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    const player = document.getElementById('audio-playback');
+                    player.src = audioUrl;
+                    player.classList.remove('hidden');
+                    audioChunks = [];
+                };
+                mediaRecorder.start();
+                isRecording = true;
+                btn.innerText = "Stop Recording";
+                statusLabel.classList.remove('hidden');
+            } else {
+                // stop recording
+                mediaRecorder.stop();
+                isRecording = false;
+                btn.innerText = "Start Recording";
+                statusLabel.classList.add('hidden');
+                mediaRecorder.stream.getTracks().forEach(t => t.stop());
+            }
+        }
+
+        async function uploadVocabulary() {
+            try {
+                const word = document.getElementById('new-word').value;
+                if (!word || !audioBlob) return showError("Please provide word and audio");
+                
+                const formData = new FormData();
+                // append the file with a valid filename including extension so backend parsing works
+                formData.append('audio_file', audioBlob, 'audio.webm'); 
+
+                // add the query param `word` to the URL since it's defined as a query param in the route schema
+                await apiCall(`/vocabulary/?word=${encodeURIComponent(word)}`, 'POST', formData, true);
+                
+                showStatus("Vocabulary uploaded!");
+                document.getElementById('new-word').value = '';
+                document.getElementById('audio-playback').classList.add('hidden');
+                audioBlob = null;
+                loadVocabulary();
+            } catch(e) {}
+        }
+
+        async function loadVocabulary() {
+            try {
+                const words = await apiCall('/vocabulary/');
+                const ul = document.getElementById('vocab-list');
+                ul.innerHTML = '';
+                words.forEach(w => {
+                    const li = document.createElement('li');
+                    li.innerText = w.word;
+                    
+                    if (role === 'little_buddy') {
+                        const playBtn = document.createElement('button');
+                        playBtn.innerText = "Play";
+                        playBtn.style.marginLeft = "10px";
+                        playBtn.onclick = () => playAudio(w.id);
+                        li.appendChild(playBtn);
+                    }
+                    ul.appendChild(li);
+                });
+            } catch(e) {}
+        }
+
+        async function playAudio(wordId) {
+            try {
+                const blob = await apiCall(`/audio/${wordId}`);
+                const url = URL.createObjectURL(blob);
+                const a = new Audio(url);
+                a.play();
+            } catch(e) {}
+        }
+
+        // --- Reading Log ---
+        async function addBook() {
+            try {
+                const title = document.getElementById('new-book-title').value;
+                const statusStr = document.getElementById('new-book-status').value;
+                await apiCall('/books/', 'POST', {book_title: title, status: statusStr});
+                showStatus("Book added!");
+                loadBooks();
+            } catch(e) {}
+        }
+
+        async function loadBooks() {
+            try {
+                const books = await apiCall('/books/');
+                const ul = document.getElementById('books-list');
+                ul.innerHTML = '';
+                books.forEach(b => {
+                    const li = document.createElement('li');
+                    li.innerText = `${b.book_title} [${b.status}]`;
+                    if (b.status === 'reading') {
+                        const btn = document.createElement('button');
+                        btn.innerText = "Mark Completed";
+                        btn.style.marginLeft = "10px";
+                        btn.onclick = () => updateBookStatus(b.id, 'completed');
+                        li.appendChild(btn);
+                    }
+                    ul.appendChild(li);
+                });
+            } catch(e) {}
+        }
+
+        async function updateBookStatus(id, newStatus) {
+            try {
+                await apiCall(`/books/${id}`, 'PUT', {status: newStatus});
+                showStatus("Book updated!");
+                loadBooks();
+            } catch(e) {}
+        }
+
+    </script>
+</body>
+</html>
